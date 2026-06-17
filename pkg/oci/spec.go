@@ -92,6 +92,8 @@ func generateDefaultSpecWithPlatform(ctx context.Context, platform, id string, s
 		err = populateDefaultWindowsSpec(ctx, s, id)
 	case "darwin":
 		err = populateDefaultDarwinSpec(s)
+	case "freebsd":
+		err = populateDefaultFreebsdSpec(s)
 	default:
 		err = populateDefaultUnixSpec(ctx, s, id)
 		if err == nil && runtime.GOOS == "windows" {
@@ -240,6 +242,27 @@ func populateDefaultDarwinSpec(s *Spec) error {
 		Root:    &specs.Root{},
 		Process: &specs.Process{Cwd: "/"},
 	}
+	s.Mounts = defaultMounts()
+	return nil
+}
+
+func populateDefaultFreebsdSpec(s *Spec) error {
+	*s = Spec{
+		Version: specs.Version,
+		Root: &specs.Root{
+			Path: defaultRootfsPath,
+		},
+		Process: &specs.Process{
+			Cwd:             "/",
+			NoNewPrivileges: true,
+			User: specs.User{
+				UID: 0,
+				GID: 0,
+			},
+		},
+		FreeBSD: &specs.FreeBSD{},
+	}
+	s.Mounts = defaultMounts()
 	return nil
 }
 

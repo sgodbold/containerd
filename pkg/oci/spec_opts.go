@@ -85,6 +85,28 @@ func setLinux(s *Spec) {
 	}
 }
 
+func setFreebsd(s *Spec) {
+	if s.FreeBSD == nil {
+		s.FreeBSD = &specs.FreeBSD{}
+	}
+}
+
+func setFreebsdJail(s *Spec) {
+	setFreebsd(s)
+
+	if s.FreeBSD.Jail == nil {
+		s.FreeBSD.Jail = &specs.FreeBSDJail{}
+	}
+}
+
+func setFreebsdJailAllow(s *Spec) {
+	setFreebsdJail(s)
+
+	if s.FreeBSD.Jail.Allow == nil {
+		s.FreeBSD.Jail.Allow = &specs.FreeBSDJailAllow{}
+	}
+}
+
 func setResources(s *Spec) {
 	if s.Linux != nil {
 		if s.Linux.Resources == nil {
@@ -1070,6 +1092,57 @@ func WithCapabilities(caps []string) SpecOpts {
 		} else if len(s.Process.Capabilities.Inheritable) > 0 {
 			filterCaps(&s.Process.Capabilities.Inheritable, caps)
 		}
+
+		return nil
+	}
+}
+
+func WithAllow(allows []string) SpecOpts {
+	return func(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
+		setFreebsdJailAllow(s)
+
+		for _, a := range allows {
+			if a == "mlock" {
+				s.FreeBSD.Jail.Allow.Mlock = true
+			}
+			if a == "rawsockets" {
+				s.FreeBSD.Jail.Allow.RawSockets = true
+			}
+
+			if a == "sethostname" {
+				s.FreeBSD.Jail.Allow.SetHostname = true
+			}
+
+			if a == "chflags" {
+				s.FreeBSD.Jail.Allow.Chflags = true
+			}
+			// Mount         []string `json:"mount,omitempty"`
+			// if a == "mount" {
+			// }
+			if a == "quotas" {
+				s.FreeBSD.Jail.Allow.Quotas = true
+			}
+			if a == "socketaf" {
+				s.FreeBSD.Jail.Allow.SocketAf = true
+			}
+			if a == "reservedports" {
+				s.FreeBSD.Jail.Allow.ReservedPorts = true
+			}
+			if a == "suser" {
+				s.FreeBSD.Jail.Allow.Suser = true
+			}
+		}
+
+		return nil
+	}
+}
+
+func WithVnetIfs(vnets []string) SpecOpts {
+	return func(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
+		setFreebsdJail(s)
+
+		s.FreeBSD.Jail.Vnet = specs.FreeBSDShareNew
+		s.FreeBSD.Jail.VnetInterfaces = vnets
 
 		return nil
 	}

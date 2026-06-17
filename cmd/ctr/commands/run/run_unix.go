@@ -105,11 +105,9 @@ func NewContainer(ctx context.Context, client *containerd.Client, cliContext *cl
 	if platform == "" {
 		plat := platforms.DefaultSpec()
 		switch plat.OS {
-		case "linux":
 		case "freebsd":
-			// TODO: freebsd support is under development, allow platform to remain unchanged.
-			// A freebsd spec generator must be implemented to make use of it, until then,
-			// either a spec must be provided or the runtime can convert from the linux spec.
+			plat.OS = "freebsd"
+		case "linux":
 		default:
 			// Other OSes do not have a supported container runtime, to use experimental runtimes,
 			// specs must be explicitly provided. Once there is a support spec generator, then
@@ -280,6 +278,14 @@ func NewContainer(ctx context.Context, client *containerd.Client, cliContext *cl
 				}
 			}
 			opts = append(opts, oci.WithDroppedCapabilities(caps))
+		}
+
+		if allows := cliContext.StringSlice("allow"); len(allows) > 0 {
+			opts = append(opts, oci.WithAllow(allows))
+		}
+
+		if vnets := cliContext.StringSlice("vnet-if"); len(vnets) > 0 {
+			opts = append(opts, oci.WithVnetIfs(vnets))
 		}
 
 		seccompProfile := cliContext.String("seccomp-profile")
