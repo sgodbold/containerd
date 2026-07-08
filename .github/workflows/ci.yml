@@ -32,7 +32,9 @@ jobs:
 
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
       - uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee  # v9.2.1
         with:
@@ -49,10 +51,11 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           path: src/github.com/containerd/containerd
           fetch-depth: 100
+          persist-credentials: false
 
       - uses: ./src/github.com/containerd/containerd/.github/actions/install-go
 
@@ -85,9 +88,10 @@ jobs:
         working-directory: src/github.com/containerd/containerd
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           path: src/github.com/containerd/containerd
+          persist-credentials: false
 
       - uses: ./src/github.com/containerd/containerd/.github/actions/install-go
 
@@ -106,7 +110,9 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
       - run: go install github.com/cpuguy83/go-md2man/v2@v2.0.7
       - run: make man
@@ -132,11 +138,15 @@ jobs:
             goarch: amd64
           - goos: freebsd
             goarch: arm64
+          - goos: linux
+            goarch: loong64
           - goos: windows
             goarch: arm64
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
       - run: |
           set -e -x
@@ -159,6 +169,9 @@ jobs:
             echo "CC=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
             ;;
           windows/arm64)
+            echo "CGO_ENABLED=0" >> $GITHUB_ENV
+            ;;
+          linux/loong64)
             echo "CGO_ENABLED=0" >> $GITHUB_ENV
             ;;
           esac
@@ -188,11 +201,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-        go-version: ["1.26.4"] # 1.25 is not supported due to k8s 1.36 requiring 1.26
+        go-version: ["1.26.5"] # 1.25 is not supported due to k8s 1.36 requiring 1.26
         exclude:
           - os: ${{ github.event.repository.private && 'ubuntu-24.04-arm' || '' }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
         with:
           go-version: ${{ matrix.go-version }}
@@ -225,17 +240,19 @@ jobs:
         working-directory: src/github.com/containerd/containerd
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           path: src/github.com/containerd/containerd
+          persist-credentials: false
 
       - uses: ./src/github.com/containerd/containerd/.github/actions/install-go
 
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: kubernetes-sigs/cri-tools
           path: src/github.com/kubernetes-sigs/cri-tools
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set env
         run: |
@@ -387,7 +404,9 @@ jobs:
     env:
       GOTEST: gotestsum --
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
 
       - name: Install containerd dependencies
@@ -627,8 +646,10 @@ jobs:
           cat /etc/os-release
           cat /proc/cpuinfo
           free -mt
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /root/.vagrant.d
           key: vagrant-${{ matrix.box }}
@@ -646,6 +667,8 @@ jobs:
           sudo systemctl enable --now libvirtd
           sudo apt-get build-dep -y ruby-libvirt
           sudo apt-get install -y --no-install-recommends libxslt-dev libxml2-dev libvirt-dev ruby-bundler ruby-dev zlib1g-dev
+          sudo env VAGRANT_DISABLE_STRICT_DEPENDENCY_ENFORCEMENT=1 vagrant plugin uninstall fog-json || true
+          sudo env VAGRANT_DISABLE_STRICT_DEPENDENCY_ENFORCEMENT=1 vagrant plugin install fog-json --plugin-version 1.2.0
           sudo env VAGRANT_DISABLE_STRICT_DEPENDENCY_ENFORCEMENT=1 vagrant plugin install vagrant-libvirt
       - name: Boot VM
         run: |
@@ -683,7 +706,9 @@ jobs:
         cgroup_driver: [cgroupfs, systemd]
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Set up cgroup v2 delegation
         run: |
           sudo mkdir -p /etc/systemd/system/user@.service.d
@@ -732,7 +757,9 @@ jobs:
       GOTEST: gotestsum --
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/install-go
       - run: script/setup/install-gotestsum
       - run: script/setup/install-teststat
