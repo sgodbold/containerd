@@ -18,23 +18,29 @@ package erofs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/internal/dmverity"
+	"github.com/containerd/containerd/v2/internal/erofsutils"
 	"github.com/containerd/containerd/v2/internal/fsverity"
 	"github.com/containerd/containerd/v2/internal/userns"
 )
+
+const snapshotTempDirPrefix = "new-"
 
 // SnapshotterConfig is used to configure the erofs snapshotter instance
 type SnapshotterConfig struct {
@@ -49,6 +55,13 @@ type SnapshotterConfig struct {
 	remapIDs    bool
 	// dmverityMode controls dm-verity behavior: "auto" (use if .dmverity exists), "on" (require .dmverity), "off" (disable)
 	dmverityMode string
+	// layerContentCaches lists directories of pre-converted, diffID-keyed erofs
+	// layer blobs. Each is checked one by one; the first hit is staged into the
+	// snapshot (symlinked) instead of downloading and converting the layer. A
+	// directory that doesn't exist is treated as a cache miss. Layers missing
+	// from all of them are converted normally. Only parentless Prepares can be
+	// served.
+	layerContentCaches []string
 }
 
 // Opt is an option to configure the erofs snapshotter
@@ -96,6 +109,16 @@ func WithRemapIDs() Opt {
 	}
 }
 
+// WithLayerContentCaches configures read-only directories of pre-converted,
+// diffID-keyed erofs layer blobs that the snapshotter sources layers from on
+// pull instead of downloading and converting them. See the layerContentCaches
+// field for details.
+func WithLayerContentCaches(paths ...string) Opt {
+	return func(config *SnapshotterConfig) {
+		config.layerContentCaches = paths
+	}
+}
+
 type MetaStore interface {
 	TransactionContext(ctx context.Context, writable bool) (context.Context, storage.Transactor, error)
 	WithTransaction(ctx context.Context, writable bool, fn storage.TransactionCallback) error
@@ -103,15 +126,16 @@ type MetaStore interface {
 }
 
 type snapshotter struct {
-	root            string
-	ms              *storage.MetaStore
-	ovlOptions      []string
-	enableFsverity  bool
-	setImmutable    bool
-	defaultWritable int64
-	blockMode       bool
-	remapIDs        bool
-	dmverityMode    string
+	root               string
+	ms                 MetaStore
+	ovlOptions         []string
+	enableFsverity     bool
+	setImmutable       bool
+	defaultWritable    int64
+	blockMode          bool
+	remapIDs           bool
+	dmverityMode       string
+	layerContentCaches []string
 }
 
 // NewSnapshotter returns a Snapshotter which uses EROFS+OverlayFS. The layers
@@ -153,6 +177,31 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		}
 	}
 
+	// A cache hit merely symlinks a shared, operator-owned blob into the snapshot,
+	// so fsverity and IMMUTABLE_FL can't be applied without mutating that blob out
+	// from under other snapshots. Reject them explicitly instead of silently
+	// skipping; dm-verity is the cache's integrity mechanism.
+	if len(config.layerContentCaches) > 0 {
+		if config.enableFsverity {
+			return nil, fmt.Errorf("enable_fsverity is incompatible with layer_content_caches; use dm-verity for cache integrity")
+		}
+		if config.setImmutable {
+			return nil, fmt.Errorf("set_immutable is incompatible with layer_content_caches")
+		}
+
+		// A cache dir is symlinked into snapshots, so a relative one would resolve
+		// against the snapshot dir and dangle. The check is only lexical: dirs are
+		// not required to exist, as a missing one just yields a cache miss and may
+		// well be provisioned after startup.
+		for _, dir := range config.layerContentCaches {
+			if !filepath.IsAbs(dir) {
+				return nil, fmt.Errorf("layer_content_caches %q must be an absolute path", dir)
+			}
+		}
+
+		log.L.WithField("dirs", config.layerContentCaches).Info("erofs layer content cache enabled")
+	}
+
 	// Check fsverity support if enabled
 	if config.enableFsverity {
 		// TODO: Call specific function here
@@ -179,15 +228,16 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	return &snapshotter{
-		root:            root,
-		ms:              ms,
-		ovlOptions:      config.ovlOptions,
-		enableFsverity:  config.enableFsverity,
-		setImmutable:    config.setImmutable,
-		defaultWritable: config.defaultSize,
-		blockMode:       config.defaultSize > 0,
-		remapIDs:        config.remapIDs,
-		dmverityMode:    config.dmverityMode,
+		root:               root,
+		ms:                 ms,
+		ovlOptions:         config.ovlOptions,
+		enableFsverity:     config.enableFsverity,
+		setImmutable:       config.setImmutable,
+		defaultWritable:    config.defaultSize,
+		blockMode:          config.defaultSize > 0,
+		remapIDs:           config.remapIDs,
+		dmverityMode:       config.dmverityMode,
+		layerContentCaches: config.layerContentCaches,
 	}, nil
 }
 
@@ -245,8 +295,8 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
-func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
-	td, err := os.MkdirTemp(snapshotDir, "new-")
+func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind, cacheBlob string) (string, error) {
+	td, err := os.MkdirTemp(snapshotDir, snapshotTempDirPrefix)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -264,6 +314,26 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 		// prepared as an EROFS layer by the EROFS snapshotter.
 		if err := os.WriteFile(filepath.Join(td, ".erofslayer"), []byte{}, 0644); err != nil {
 			return td, err
+		}
+	}
+
+	// Layer content cache hit: stage the pre-converted blob as a symlink into the
+	// active snapshot; the caller commits it later, once the parent is known.
+	if cacheBlob != "" {
+		layerBlob := filepath.Join(td, "layer.erofs")
+		if err := os.Symlink(cacheBlob, layerBlob); err != nil {
+			return td, fmt.Errorf("failed to symlink cached layer blob: %w", err)
+		}
+		// Copy the dm-verity sidecar alongside the blob (unless dm-verity is off,
+		// when it's never consumed) so mount-time metadata resolution and the
+		// pinned root hash match locally-converted layers. A missing sidecar is
+		// fine except with dmverity_mode "on", which requires it.
+		if s.dmverityMode != "off" {
+			if err := fs.CopyFile(dmverity.MetadataPath(layerBlob), dmverity.MetadataPath(cacheBlob)); err != nil {
+				if s.dmverityMode == "on" || !errors.Is(err, os.ErrNotExist) {
+					return td, fmt.Errorf("failed to copy dm-verity sidecar: %w", err)
+				}
+			}
 		}
 	}
 
@@ -349,9 +419,6 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 
 	if len(snap.ParentIDs) == 0 {
 		if layerBlob, err := s.lowerPath(snap.ID); err == nil {
-			if snap.Kind != snapshots.KindView {
-				return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
-			}
 			if s.enableFsverity {
 				if err := s.verifyFsverity(layerBlob); err != nil {
 					return nil, err
@@ -448,13 +515,14 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		return []mount.Mount{m}, nil
 	}
 
+	// first marks the start of the lowerdir range. A merged fsmeta ends the
+	// range but never moves its start: lowers stacked above it stay in range.
 	first := len(mounts)
 	for i := range snap.ParentIDs {
 		// If a merged fsmeta is valid for this layer, skip the remaining bottom layers.
 		// Why? Because bottom layers have been flattened with the thin fsmeta.
 		if m, ok := s.mountFsMeta(snap, i); ok {
 			mounts = append(mounts, m)
-			first = len(mounts) - 1
 			break
 		}
 
@@ -503,12 +571,32 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 	}), nil
 }
 
+// createSnapshot creates an active (or view) snapshot and returns its mounts.
+// On a parentless image-layer extraction whose diffID blob is in the layer content cache,
+// it stages the cached blob into the active snapshot (without committing) and
+// returns it as a read-only mount, so the unpacker can detect the fast path
+// (skip the layer download and conversion) while still committing the
+// snapshot normally — applying the parent at Commit time, which keeps the
+// cache compatible with parallel unpacking.
 func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
 	var (
 		snap     storage.Snapshot
 		td, path string
 		info     snapshots.Info
 	)
+
+	// Only parentless extractions can be served: s.mounts picks a staged blob up
+	// only when there are no parents, so with a parent the differ would write
+	// through the staged symlink into the shared cache blob.
+	var cacheBlob string
+	if kind == snapshots.KindActive && parent == "" {
+		if cacheBlob = s.lookupCache(ctx, opts...); cacheBlob != "" {
+			log.G(ctx).WithFields(log.Fields{
+				"key":  key,
+				"blob": cacheBlob,
+			}).Debug("layer content cache hit, staged cached erofs blob")
+		}
+	}
 
 	defer func() {
 		if err != nil {
@@ -527,7 +615,7 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}()
 
 	snapshotDir := filepath.Join(s.root, "snapshots")
-	td, err = s.prepareDirectory(ctx, snapshotDir, kind)
+	td, err = s.prepareDirectory(ctx, snapshotDir, kind, cacheBlob)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prepare snapshot dir: %w", err)
 	}
@@ -608,6 +696,59 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 func (s *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
 	return s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
+}
+
+// lookupCache returns the absolute path of the cached erofs blob that can serve
+// the layer being prepared, or "" on a miss. It gates on: at least one cache
+// being configured, the Prepare being an image-layer extraction (carries the
+// snapshot.ref and diff-id labels), and the diffID blob being present. Caches
+// are checked one by one and the first hit wins. Every miss (cache disabled,
+// non-extraction Prepare, absent or unreadable cache dir, missing entry,
+// malformed labels) returns "" so pulls keep working. Any dm-verity sidecar is
+// derived from the blob path (via dmverity.MetadataPath) when the blob is
+// staged (prepareDirectory).
+func (s *snapshotter) lookupCache(ctx context.Context, opts ...snapshots.Opt) string {
+	if len(s.layerContentCaches) == 0 {
+		return ""
+	}
+
+	var base snapshots.Info
+	for _, opt := range opts {
+		if err := opt(&base); err != nil {
+			return ""
+		}
+	}
+
+	diffIDStr := base.Labels[snapshots.LabelSnapshotDiffID]
+	if base.Labels[snapshots.LabelSnapshotRef] == "" || diffIDStr == "" {
+		// Not an image-layer extraction, or no diffID to key on.
+		return ""
+	}
+	diffID, err := digest.Parse(diffIDStr)
+	if err != nil {
+		log.G(ctx).WithError(err).WithField("diffID", diffIDStr).
+			Warn("erofs layer cache: invalid diff-id label, treating as cache miss")
+		return ""
+	}
+
+	for _, dir := range s.layerContentCaches {
+		blob := erofsutils.CacheBlobPath(dir, diffID)
+		if _, err := os.Stat(blob); err != nil {
+			if !os.IsNotExist(err) {
+				// An unreadable cache (a down FUSE mount, a permission change since
+				// startup) shouldn't fail the pull or mask a hit in a later cache.
+				log.G(ctx).WithError(err).WithField("blob", blob).
+					Warn("erofs layer cache: failed to stat cache blob, skipping this cache")
+			}
+			continue
+		}
+		// Absolute, since the configured dirs are validated as such: the hit is
+		// symlinked into the snapshot dir, where a relative target would dangle.
+		return blob
+	}
+
+	log.G(ctx).WithField("diffID", diffID.String()).Trace("erofs layer cache miss")
+	return ""
 }
 
 func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
@@ -753,6 +894,12 @@ func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 
 	cleanup := []string{}
 	for _, d := range dirs {
+		// A new-* directory may belong to a concurrent snapshot creation. It is
+		// renamed to its metadata ID after the writer transaction is acquired, so
+		// Remove must not treat it as an orphan in the meantime.
+		if strings.HasPrefix(d, snapshotTempDirPrefix) {
+			continue
+		}
 		if _, ok := ids[d]; ok {
 			continue
 		}
@@ -798,10 +945,20 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 
 		// The layer blob is only persisted for committed snapshots.
 		if info.Kind == snapshots.KindCommitted {
-			// Clear IMMUTABLE_FL before removal, since this flag avoids it.
-			err = setImmutable(s.layerBlobPath(id), false)
-			if err != nil && !errdefs.IsNotImplemented(err) {
-				return fmt.Errorf("failed to clear IMMUTABLE_FL: %w", err)
+			layerBlob := s.layerBlobPath(id)
+			// A cache-hit snapshot's blob is a symlink into the operator-owned
+			// cache dir. Skip clearing IMMUTABLE_FL: setImmutable's os.Open would
+			// follow the link and ioctl the cache entry (which we don't own), and
+			// cache blobs were never made immutable by us in the first place.
+			// os.RemoveAll below unlinks the symlink without following it.
+			if fi, lerr := os.Lstat(layerBlob); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				log.G(ctx).WithField("id", id).Trace("erofs layer cache: skipping IMMUTABLE_FL clear for symlinked cache blob")
+			} else {
+				// Clear IMMUTABLE_FL before removal, since this flag avoids it.
+				err = setImmutable(layerBlob, false)
+				if err != nil && !errdefs.IsNotImplemented(err) {
+					return fmt.Errorf("failed to clear IMMUTABLE_FL: %w", err)
+				}
 			}
 		}
 		_, _, err = storage.Remove(ctx, key)
